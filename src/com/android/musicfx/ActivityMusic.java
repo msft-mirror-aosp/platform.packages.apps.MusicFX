@@ -30,8 +30,12 @@ import android.content.DialogInterface;
 import android.content.DialogInterface.OnCancelListener;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.media.AudioAttributes;
+import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.media.AudioManager.AudioPlaybackCallback;
+import android.media.AudioPlaybackConfiguration;
 import android.media.audiofx.AudioEffect;
 import android.media.audiofx.AudioEffect.Descriptor;
 import android.media.audiofx.Virtualizer;
@@ -61,8 +65,11 @@ import android.widget.Toast;
 
 import java.util.Formatter;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -194,47 +201,56 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
      */
     private String mCallingPackageName = "empty";
 
-    /**
-     * Audio session field
-     */
-    private int mAudioSession = AudioEffect.ERROR_BAD_VALUE;
-
-    // Broadcast receiver to handle wired and Bluetooth A2dp headset events
-    private final BroadcastReceiver mReceiver = new BroadcastReceiver() {
+    // Audio Playback monitoring Callback to determine if a headset is used for music playback
+    private final AudioPlaybackCallback mMyAudioPlaybackCallback = new AudioPlaybackCallback() {
         @Override
-        public void onReceive(final Context context, final Intent intent) {
-            final String action = intent.getAction();
-            final boolean isHeadsetOnPrev = mIsHeadsetOn;
-            final AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-            if (action.equals(Intent.ACTION_HEADSET_PLUG)) {
-                mIsHeadsetOn = (intent.getIntExtra("state", 0) == 1)
-                        || audioManager.isBluetoothA2dpOn();
-            } else if (action.equals(BluetoothDevice.ACTION_ACL_CONNECTED)) {
-                final int deviceClass = ((BluetoothDevice) intent
-                        .getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)).getBluetoothClass()
-                        .getDeviceClass();
-                if ((deviceClass == BluetoothClass.Device.AUDIO_VIDEO_HEADPHONES)
-                        || (deviceClass == BluetoothClass.Device.AUDIO_VIDEO_WEARABLE_HEADSET)) {
-                    mIsHeadsetOn = true;
-                }
-            } else if (action.equals(AudioManager.ACTION_AUDIO_BECOMING_NOISY)) {
-                mIsHeadsetOn = audioManager.isBluetoothA2dpOn() || audioManager.isWiredHeadsetOn();
-            } else if (action.equals(BluetoothDevice.ACTION_ACL_DISCONNECTED)) {
-                final int deviceClass = ((BluetoothDevice) intent
-                        .getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)).getBluetoothClass()
-                        .getDeviceClass();
-                if ((deviceClass == BluetoothClass.Device.AUDIO_VIDEO_HEADPHONES)
-                        || (deviceClass == BluetoothClass.Device.AUDIO_VIDEO_WEARABLE_HEADSET)) {
-                    mIsHeadsetOn = audioManager.isWiredHeadsetOn();
-                }
-            }
-            if (isHeadsetOnPrev != mIsHeadsetOn) {
+        public void onPlaybackConfigChanged(List<AudioPlaybackConfiguration> configs) {
+            boolean isHeadsetOn = isHeadsetUsedForMedia(configs);
+            if (isHeadsetOn != mIsHeadsetOn) {
+                mIsHeadsetOn = isHeadsetOn;
                 updateUIHeadset();
             }
         }
     };
 
-    /*
+    private static boolean isConfigForMedia(AudioPlaybackConfiguration apc) {
+        AudioAttributes attr = apc.getAudioAttributes();
+        if (attr.getUsage() == AudioAttributes.USAGE_MEDIA
+                || attr.getUsage() == AudioAttributes.USAGE_GAME
+                || attr.getUsage() == AudioAttributes.USAGE_UNKNOWN) {
+            return true;
+        }
+        return false;
+    }
+
+    public static final Set<Integer> HEADSET_DEVICE_TYPES = new HashSet<>();
+    static {
+        HEADSET_DEVICE_TYPES.add(AudioDeviceInfo.TYPE_WIRED_HEADSET);
+        HEADSET_DEVICE_TYPES.add(AudioDeviceInfo.TYPE_WIRED_HEADPHONES);
+        HEADSET_DEVICE_TYPES.add(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP);
+        HEADSET_DEVICE_TYPES.add(AudioDeviceInfo.TYPE_BLUETOOTH_SCO);
+        HEADSET_DEVICE_TYPES.add(AudioDeviceInfo.TYPE_USB_HEADSET);
+        HEADSET_DEVICE_TYPES.add(AudioDeviceInfo.TYPE_HEARING_AID);
+        HEADSET_DEVICE_TYPES.add(AudioDeviceInfo.TYPE_BLE_HEADSET);
+    }
+
+    private static boolean isConfigForHeadset(AudioPlaybackConfiguration apc) {
+        AudioDeviceInfo device = apc.getAudioDeviceInfo();
+        if (device == null) {
+            return false;
+        }
+        return HEADSET_DEVICE_TYPES.contains(device.getType());
+    }
+
+    private static boolean isHeadsetUsedForMedia(List<AudioPlaybackConfiguration> configs) {
+        for (AudioPlaybackConfiguration config : configs) {
+            if (config.isActive() && isConfigForMedia(config) && isConfigForHeadset(config)) {
+                return true;
+            }
+        }
+        return false;
+    }
+        /*
      * Declares and initializes all objects and widgets in the layouts and the CheckBox and SeekBar
      * onchange methods on creation.
      *
@@ -252,9 +268,9 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
         // Receive intent
         // get calling intent
         final Intent intent = getIntent();
-        mAudioSession = intent.getIntExtra(AudioEffect.EXTRA_AUDIO_SESSION,
-                AudioEffect.ERROR_BAD_VALUE);
-        Log.v(TAG, "audio session: " + mAudioSession);
+        final int audioSession = intent.getIntExtra(AudioEffect.EXTRA_AUDIO_SESSION,
+                ControlPanelEffect.AUDIO_SESSION_ID_UNSPECIFIED);
+        Log.v(TAG, "audio session: " + audioSession);
 
         mCallingPackageName = getCallingPackage();
 
@@ -267,9 +283,9 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
         }
         setResult(RESULT_OK);
 
-        Log.v(TAG, mCallingPackageName + " (" + mAudioSession + ")");
+        Log.v(TAG, mCallingPackageName + " (" + audioSession + ")");
 
-        ControlPanelEffect.initEffectsPreferences(mContext, mCallingPackageName, mAudioSession);
+        ControlPanelEffect.initEffectsPreferences(mContext, mCallingPackageName, audioSession);
 
         // query available effects
         final Descriptor[] effects = AudioEffect.queryEffects();
@@ -301,11 +317,11 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
         // Fill array with presets from AudioEffects call.
         // allocate a space for 2 extra strings (CI Extreme & User)
         final int numPresets = ControlPanelEffect.getParameterInt(mContext, mCallingPackageName,
-                mAudioSession, ControlPanelEffect.Key.eq_num_presets);
+                ControlPanelEffect.Key.eq_num_presets);
         mEQPresetNames = new String[numPresets + 2];
         for (short i = 0; i < numPresets; i++) {
             mEQPresetNames[i] = ControlPanelEffect.getParameterString(mContext,
-                    mCallingPackageName, mAudioSession, ControlPanelEffect.Key.eq_preset_name, i);
+                    mCallingPackageName, ControlPanelEffect.Key.eq_preset_name, i);
             Integer localizedNameId = LOCALIZED_EQUALIZER_PRESET_NAMES.get(mEQPresetNames[i]);
             if (localizedNameId != null) {
                 mEQPresetNames[i] = getString(localizedNameId);
@@ -329,7 +345,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
 
                     // set parameter and state
                     ControlPanelEffect.setParameterBoolean(mContext, mCallingPackageName,
-                            mAudioSession, ControlPanelEffect.Key.global_enabled, isChecked);
+                            ControlPanelEffect.Key.global_enabled, isChecked);
                     // Enable Linear layout (in scroll layout) view with all
                     // effect contents depending on checked state
                     setEnabledAllChildren(viewGroup, isChecked);
@@ -366,7 +382,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
                             final boolean fromUser) {
                         // set parameter and state
                         ControlPanelEffect.setParameterInt(mContext, mCallingPackageName,
-                                mAudioSession, ControlPanelEffect.Key.virt_strength, progress);
+                                ControlPanelEffect.Key.virt_strength, progress);
                     }
 
                     // If slider pos was 0 when starting re-enable effect
@@ -374,7 +390,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
                     public void onStartTrackingTouch(final SeekBar seekBar) {
                         if (seekBar.getProgress() == 0) {
                             ControlPanelEffect.setParameterBoolean(mContext, mCallingPackageName,
-                                    mAudioSession, ControlPanelEffect.Key.virt_enabled, true);
+                                    ControlPanelEffect.Key.virt_enabled, true);
                         }
                     }
 
@@ -384,7 +400,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
                         if (seekBar.getProgress() == 0) {
                             // disable
                             ControlPanelEffect.setParameterBoolean(mContext, mCallingPackageName,
-                                    mAudioSession, ControlPanelEffect.Key.virt_enabled, false);
+                                    ControlPanelEffect.Key.virt_enabled, false);
                         }
                     }
                 });
@@ -395,7 +411,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
                     public void onCheckedChanged(final CompoundButton buttonView,
                             final boolean isChecked) {
                         ControlPanelEffect.setParameterBoolean(mContext, mCallingPackageName,
-                                mAudioSession, ControlPanelEffect.Key.virt_enabled, isChecked);
+                                ControlPanelEffect.Key.virt_enabled, isChecked);
                     }
                 });
             }
@@ -428,7 +444,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
                             final boolean fromUser) {
                         // set parameter and state
                         ControlPanelEffect.setParameterInt(mContext, mCallingPackageName,
-                                mAudioSession, ControlPanelEffect.Key.bb_strength, progress);
+                                ControlPanelEffect.Key.bb_strength, progress);
                     }
 
                     // If slider pos was 0 when starting re-enable effect
@@ -436,7 +452,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
                     public void onStartTrackingTouch(final SeekBar seekBar) {
                         if (seekBar.getProgress() == 0) {
                             ControlPanelEffect.setParameterBoolean(mContext, mCallingPackageName,
-                                    mAudioSession, ControlPanelEffect.Key.bb_enabled, true);
+                                    ControlPanelEffect.Key.bb_enabled, true);
                         }
                     }
 
@@ -446,7 +462,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
                         if (seekBar.getProgress() == 0) {
                             // disable
                             ControlPanelEffect.setParameterBoolean(mContext, mCallingPackageName,
-                                    mAudioSession, ControlPanelEffect.Key.bb_enabled, false);
+                                    ControlPanelEffect.Key.bb_enabled, false);
                         }
 
                     }
@@ -456,7 +472,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
             // Initialize the Equalizer elements.
             if (mEqualizerSupported) {
                 mEQPreset = ControlPanelEffect.getParameterInt(mContext, mCallingPackageName,
-                        mAudioSession, ControlPanelEffect.Key.eq_current_preset);
+                        ControlPanelEffect.Key.eq_current_preset);
                 if (mEQPreset >= mEQPresetNames.length) {
                     mEQPreset = 0;
                 }
@@ -469,7 +485,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
             // Set Spinner listeners.
             if (mPresetReverbSupported) {
                 mPRPreset = ControlPanelEffect.getParameterInt(mContext, mCallingPackageName,
-                        mAudioSession, ControlPanelEffect.Key.pr_current_preset);
+                        ControlPanelEffect.Key.pr_current_preset);
                 mPRPresetPrevious = mPRPreset;
                 reverbSpinnerInit((Spinner)findViewById(R.id.prSpinner));
             }
@@ -483,7 +499,6 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
                     ActionBar.LayoutParams.WRAP_CONTENT,
                     Gravity.CENTER_VERTICAL | Gravity.RIGHT));
             ab.setDisplayOptions(ActionBar.DISPLAY_SHOW_TITLE | ActionBar.DISPLAY_SHOW_CUSTOM);
-
         } else {
             viewGroup.setVisibility(View.GONE);
             ((TextView) findViewById(R.id.noEffectsTextView)).setVisibility(View.VISIBLE);
@@ -501,18 +516,11 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
         super.onResume();
         if ((mVirtualizerSupported) || (mBassBoostSupported) || (mEqualizerSupported)
                 || (mPresetReverbSupported)) {
-            // Listen for broadcast intents that might affect the onscreen UI for headset.
-            final IntentFilter intentFilter = new IntentFilter(Intent.ACTION_HEADSET_PLUG);
-            intentFilter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
-            intentFilter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
-            intentFilter.addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
-            registerReceiver(mReceiver, intentFilter);
-
-            // Check if wired or Bluetooth headset is connected/on
-            final AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-            mIsHeadsetOn = (audioManager.isWiredHeadsetOn() || audioManager.isBluetoothA2dpOn());
+            // Monitor active playback configurations used for media and playing on a headset.
+            final AudioManager audioManager = (AudioManager) getSystemService(AudioManager.class);
+            audioManager.registerAudioPlaybackCallback(mMyAudioPlaybackCallback, null);
+            mIsHeadsetOn = isHeadsetUsedForMedia(audioManager.getActivePlaybackConfigurations());
             Log.v(TAG, "onResume: mIsHeadsetOn : " + mIsHeadsetOn);
-
             // Update UI
             updateUI();
         }
@@ -527,11 +535,12 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
     protected void onPause() {
         super.onPause();
 
-        // Unregister for broadcast intents. (These affect the visible UI,
+        // Stop monitoring active playback configurations. (These affect the visible UI,
         // so we only care about them while we're in the foreground.)
         if ((mVirtualizerSupported) || (mBassBoostSupported) || (mEqualizerSupported)
                 || (mPresetReverbSupported)) {
-            unregisterReceiver(mReceiver);
+            final AudioManager audioManager = (AudioManager) getSystemService(AudioManager.class);
+            audioManager.unregisterAudioPlaybackCallback(mMyAudioPlaybackCallback);
         }
     }
 
@@ -604,7 +613,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
      */
     private void updateUI() {
         final boolean isEnabled = ControlPanelEffect.getParameterBoolean(mContext,
-                mCallingPackageName, mAudioSession, ControlPanelEffect.Key.global_enabled);
+                mCallingPackageName, ControlPanelEffect.Key.global_enabled);
         mToggleSwitch.setChecked(isEnabled);
         setEnabledAllChildren((ViewGroup) findViewById(R.id.contentSoundEffects), isEnabled);
         updateUIHeadset();
@@ -613,12 +622,11 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
             SeekBar bar = (SeekBar) findViewById(R.id.vIStrengthSeekBar);
             Switch sw = (Switch) findViewById(R.id.vIStrengthToggle);
             int strength = ControlPanelEffect
-                    .getParameterInt(mContext, mCallingPackageName, mAudioSession,
+                    .getParameterInt(mContext, mCallingPackageName,
                             ControlPanelEffect.Key.virt_strength);
             bar.setProgress(strength);
             boolean hasStrength = ControlPanelEffect.getParameterBoolean(mContext,
-                    mCallingPackageName, mAudioSession,
-                    ControlPanelEffect.Key.virt_strength_supported);
+                    mCallingPackageName, ControlPanelEffect.Key.virt_strength_supported);
             if (hasStrength) {
                 sw.setVisibility(View.GONE);
             } else {
@@ -628,7 +636,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
         }
         if (mBassBoostSupported) {
             ((SeekBar) findViewById(R.id.bBStrengthSeekBar)).setProgress(ControlPanelEffect
-                    .getParameterInt(mContext, mCallingPackageName, mAudioSession,
+                    .getParameterInt(mContext, mCallingPackageName,
                             ControlPanelEffect.Key.bb_strength));
         }
         if (mEqualizerSupported) {
@@ -636,7 +644,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
         }
         if (mPresetReverbSupported) {
             int reverb = ControlPanelEffect.getParameterInt(
-                                    mContext, mCallingPackageName, mAudioSession,
+                                    mContext, mCallingPackageName,
                                     ControlPanelEffect.Key.pr_current_preset);
             ((Spinner)findViewById(R.id.prSpinner)).setSelection(reverb);
         }
@@ -666,14 +674,13 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
     private void equalizerBandsInit(View eqcontainer) {
         // Initialize the N-Band Equalizer elements.
         mNumberEqualizerBands = ControlPanelEffect.getParameterInt(mContext, mCallingPackageName,
-                mAudioSession, ControlPanelEffect.Key.eq_num_bands);
+                ControlPanelEffect.Key.eq_num_bands);
         mEQPresetUserBandLevelsPrev = ControlPanelEffect.getParameterIntArray(mContext,
-                mCallingPackageName, mAudioSession,
-                ControlPanelEffect.Key.eq_preset_user_band_level);
+                mCallingPackageName, ControlPanelEffect.Key.eq_preset_user_band_level);
         final int[] centerFreqs = ControlPanelEffect.getParameterIntArray(mContext,
-                mCallingPackageName, mAudioSession, ControlPanelEffect.Key.eq_center_freq);
+                mCallingPackageName, ControlPanelEffect.Key.eq_center_freq);
         final int[] bandLevelRange = ControlPanelEffect.getParameterIntArray(mContext,
-                mCallingPackageName, mAudioSession, ControlPanelEffect.Key.eq_level_range);
+                mCallingPackageName, ControlPanelEffect.Key.eq_level_range);
         mEqualizerMinBandLevel = (int) Math.max(EQUALIZER_MIN_LEVEL, bandLevelRange[0]);
         final int mEqualizerMaxBandLevel = (int) Math.min(EQUALIZER_MAX_LEVEL, bandLevelRange[1]);
 
@@ -754,7 +761,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
     public void onStartTrackingTouch(final SeekBar seekbar) {
         // get current levels
         final int[] bandLevels = ControlPanelEffect.getParameterIntArray(mContext,
-                mCallingPackageName, mAudioSession, ControlPanelEffect.Key.eq_band_level);
+                mCallingPackageName, ControlPanelEffect.Key.eq_band_level);
         // copy current levels to user preset
         for (short band = 0; band < mNumberEqualizerBands; band++) {
             equalizerBandUpdate(band, bandLevels[band]);
@@ -783,7 +790,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
     private void equalizerUpdateDisplay() {
         // Update and show the active N-Band Equalizer bands.
         final int[] bandLevels = ControlPanelEffect.getParameterIntArray(mContext,
-                mCallingPackageName, mAudioSession, ControlPanelEffect.Key.eq_band_level);
+                mCallingPackageName, ControlPanelEffect.Key.eq_band_level);
         for (short band = 0; band < mNumberEqualizerBands; band++) {
             final int level = bandLevels[band];
             final int progress = level - mEqualizerMinBandLevel;
@@ -800,7 +807,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
      *            EQ band level
      */
     private void equalizerBandUpdate(final int band, final int level) {
-        ControlPanelEffect.setParameterInt(mContext, mCallingPackageName, mAudioSession,
+        ControlPanelEffect.setParameterInt(mContext, mCallingPackageName,
                 ControlPanelEffect.Key.eq_band_level, level, band);
     }
 
@@ -811,7 +818,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
      *            EQ preset id.
      */
     private void equalizerSetPreset(final int preset) {
-        ControlPanelEffect.setParameterInt(mContext, mCallingPackageName, mAudioSession,
+        ControlPanelEffect.setParameterInt(mContext, mCallingPackageName,
                 ControlPanelEffect.Key.eq_current_preset, preset);
         equalizerUpdateDisplay();
     }
@@ -823,7 +830,7 @@ public class ActivityMusic extends Activity implements OnSeekBarChangeListener {
      *            PR preset id.
      */
     private void presetReverbSetPreset(final int preset) {
-        ControlPanelEffect.setParameterInt(mContext, mCallingPackageName, mAudioSession,
+        ControlPanelEffect.setParameterInt(mContext, mCallingPackageName,
                 ControlPanelEffect.Key.pr_current_preset, preset);
     }
 
